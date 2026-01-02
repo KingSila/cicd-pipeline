@@ -1,10 +1,7 @@
-# ASP.NET Core
-# Build and test ASP.NET Core projects targeting .NET Core.
-# Add steps that run tests, create a NuGet package, deploy, and more:
-# https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
-
 trigger:
-- main
+  branches:
+    include:
+      - main
 
 pool:
   vmImage: ubuntu-latest
@@ -13,5 +10,83 @@ variables:
   buildConfiguration: 'Release'
 
 steps:
-- script: dotnet build --configuration $(buildConfiguration)
-  displayName: 'dotnet build $(buildConfiguration)'
+  - checkout: self
+    fetchDepth: 0
+
+  - task: UseDotNet@2
+    displayName: "Use .NET SDK 8.x"
+    inputs:
+      packageType: 'sdk'
+      version: '8.x'
+
+  - bash: |
+      set -euo pipefail
+
+      echo "== Repo root =="
+      pwd
+      ls -la
+
+      echo ""
+      echo "== Searching for solution/project files (maxdepth 8) =="
+      mapfile -t SLN < <(find . -maxdepth 8 -type f -name "*.sln" | sort)
+      mapfile -t CSPROJ < <(find . -maxdepth 8 -type f -name "*.csproj" | sort)
+
+      echo ""
+      echo "Solutions found: ${#SLN[@]}"
+      for f in "${SLN[@]}"; do echo "  $f"; done
+
+      echo ""
+      echo "Projects found: ${#CSPROJ[@]}"
+      for f in "${CSPROJ[@]}"; do echo "  $f"; done
+
+      echo ""
+      if [ "${#SLN[@]}" -eq 1 ]; then
+        TARGET="${SLN[0]}"
+        echo "Using solution: $TARGET"
+      elif [ "${#SLN[@]}" -gt 1 ]; then
+        echo "ERROR: Multiple .sln files found. Pick one and hardcode its path in the YAML."
+        exit 1
+      elif [ "${#CSPROJ[@]}" -eq 1 ]; then
+        TARGET="${CSPROJ[0]}"
+        echo "Using project: $TARGET"
+      elif [ "${#CSPROJ[@]}" -gt 1 ]; then
+        echo "ERROR: No .sln found, and multiple .csproj files found. Pick one and hardcode its path in the YAML."
+        exit 1
+      else
+        echo "ERROR: No .sln or .csproj found within maxdepth 8."
+        exit 1
+      fi
+
+      echo "##vso[task.setvariable variable=buildTarget]$TARGET"
+    displayName: "Detect .sln/.csproj and set buildTarget"
+
+  - bash: |
+      set -euo pipefail
+      echo "Restoring: $(buildTarget)"
+      dotnet restore "$(buildTarget)"
+    displayName: "Restore"
+
+  - bash: |
+      set -euo pipefail
+      echo "Building: $(buildTarget)"
+      dotnet build "$(buildTarget)" --configuration "$(buildConfiguration)" --no-restore
+    displayName: "Build"
+
+  - bash: |
+      set -euo pipefail
+      echo "Testing: $(buildTarget)"
+      dotnet test "$(buildTarget)" --configuration "$(buildConfiguration)" --no-build --verbosity normal
+    displayName: "Test"
+
+  - bash: |
+      set -euo pipefail
+      echo "Publishing: $(buildTarget)"
+      dotnet publish "$(buildTarget)" --configuration "$(buildConfiguration)" --output "$(Build.ArtifactStagingDirectory)"
+    displayName: "Publish"
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Publish Artifact (drop)"
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+      ArtifactName: 'drop'
+      publishLocation: 'Container'
