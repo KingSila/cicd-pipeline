@@ -1,3 +1,4 @@
+
 trigger:
   branches:
     include:
@@ -8,40 +9,119 @@ pr:
     include:
       - main
 
+variables:
+  buildConfiguration: 'Release'
+  projectPath: 'src/WebApp/WebApp.csproj'
+  dotnetSdkVersion: '9.x'
+
+
+  azureSubscription: 'sc-azure'
+  devAppName: 'webapp-kingsila-dev'
+  prodAppName: 'webapp-kingsila-prod'
+
 stages:
 - stage: Build
+  displayName: "Build & Test"
   jobs:
   - job: BuildJob
+    displayName: "Build Job"
     pool:
       vmImage: ubuntu-latest
-    variables:
-      buildConfiguration: 'Release'
-      projectPath: 'src/WebApp/WebApp.csproj'
+
     steps:
     - checkout: self
       fetchDepth: 0
 
     - task: UseDotNet@2
+      displayName: "Use .NET SDK $(dotnetSdkVersion)"
       inputs:
         packageType: 'sdk'
-        version: '9.x'
-      displayName: "Use .NET SDK 9.x"
+        version: '$(dotnetSdkVersion)'
 
-    - bash: dotnet restore "$(projectPath)"
+    - bash: |
+        set -euo pipefail
+        dotnet restore "$(projectPath)"
       displayName: "Restore"
 
-    - bash: dotnet build "$(projectPath)" --configuration "$(buildConfiguration)" --no-restore
+    - bash: |
+        set -euo pipefail
+        dotnet build "$(projectPath)" --configuration "$(buildConfiguration)" --no-restore
       displayName: "Build"
 
-    - bash: dotnet test "$(projectPath)" --configuration "$(buildConfiguration)" --no-build --verbosity normal
+    - bash: |
+        set -euo pipefail
+        dotnet test "$(projectPath)" --configuration "$(buildConfiguration)" --no-build --verbosity normal
       displayName: "Test"
 
-    - bash: dotnet publish "$(projectPath)" --configuration "$(buildConfiguration)" --output "$(Build.ArtifactStagingDirectory)"
+    - bash: |
+        set -euo pipefail
+        dotnet publish "$(projectPath)" --configuration "$(buildConfiguration)" --output "$(Build.ArtifactStagingDirectory)/publish"
       displayName: "Publish"
 
-    - task: PublishBuildArtifacts@1
+    - task: ArchiveFiles@2
+      displayName: "Archive publish output"
       inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/publish'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/drop/WebApp.zip'
+        replaceExistingArchive: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish Artifact (drop)"
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/drop'
         ArtifactName: 'drop'
         publishLocation: 'Container'
-      displayName: "Publish Artifact (drop)"
+
+
+- stage: Deploy_Dev
+  displayName: "Deploy to Dev"
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeployDev
+    displayName: "Deploy Dev"
+    environment: 'dev'   # Create this in Azure DevOps Environments if you want tracking
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: drop
+
+          - task: AzureWebApp@1
+            displayName: "Deploy to Dev App Service"
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              appType: 'webAppLinux'          # use 'webAppLinux' if your App Service is Linux
+              appName: '$(devAppName)'
+              package: '$(Pipeline.Workspace)/drop/WebApp.zip'
+
+
+- stage: Deploy_Prod
+  displayName: "Deploy to Prod"
+  dependsOn: Deploy_Dev
+  condition: succeeded()
+  jobs:
+  - deployment: DeployProd
+    displayName: "Deploy Prod"
+    environment: 'prod'  # Put approvals on this Environment in Azure DevOps
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: drop
+
+          - task: AzureWebApp@1
+            displayName: "Deploy to Prod App Service"
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              appType: 'webAppLinux'          # use 'webAppLinux' if your App Service is Linux
+              appName: '$(prodAppName)'
+              package: '$(Pipeline.Workspace)/drop/WebApp.zip'
